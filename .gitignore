@@ -1,0 +1,8 @@
+.streamlit/secrets.toml
+.venv/
+__pycache__/
+*.pyc
+data/portfolio.db
+data/simulation.db
+data/sim_report_*.json
+.env
