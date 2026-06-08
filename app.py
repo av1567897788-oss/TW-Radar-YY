@@ -117,6 +117,46 @@ with col_api:
     else:
         st.markdown("<div style='text-align:right; padding-top:10px;'>🟡 <span style='color:#FFD700; font-size:0.8rem;'>API 異常</span></div>", unsafe_allow_html=True)
 
+# ── 網路狀態自動偵測（快取5分鐘，顯示各 API 可用性）──────
+_net_cache_key = "net_status_cache"
+_net_time_key  = "net_status_time"
+_net_expired   = (datetime.now() - st.session_state.get(_net_time_key, datetime.min)).seconds > 300
+
+if _net_expired or _net_cache_key not in st.session_state:
+    import requests as _req
+
+    def _probe(url, timeout=4):
+        try:
+            r = _req.get(url, timeout=timeout, verify=False,
+                         headers={"User-Agent": "Mozilla/5.0"})
+            return r.status_code < 400
+        except Exception:
+            return False
+
+    st.session_state[_net_cache_key] = {
+        "twse":    _probe("https://mis.twse.com.tw"),
+        "finmind": _probe("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"),
+        "general": _probe("https://www.google.com"),
+    }
+    st.session_state[_net_time_key] = datetime.now()
+
+_ns = st.session_state.get(_net_cache_key, {})
+_net_parts = []
+if _ns.get("general"):  _net_parts.append("🌐 外網")
+if _ns.get("twse"):     _net_parts.append("🏦 TWSE")
+if _ns.get("finmind"):  _net_parts.append("📊 FinMind")
+if _net_parts:
+    _net_bar_color = "#00D4AA" if _ns.get("finmind") else "#FFD700"
+    st.markdown(
+        f"<div style='font-size:0.72rem; color:{_net_bar_color}; "
+        f"text-align:right; padding-bottom:4px;'>"
+        f"{'　'.join(_net_parts)}</div>",
+        unsafe_allow_html=True
+    )
+else:
+    st.markdown("<div style='font-size:0.72rem; color:#FF4B4B; text-align:right;'>❌ 網路異常</div>",
+                unsafe_allow_html=True)
+
 # ── 餘額不足警示橫幅 ────────────────────────────────────
 if api_status["status"] == "no_credit":
     st.markdown("""
