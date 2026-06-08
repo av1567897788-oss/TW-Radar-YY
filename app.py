@@ -31,7 +31,7 @@ st.set_page_config(
 init_db()
 
 # ── 自動刷新（盤中5分鐘，盤外30分鐘）──────────────────
-_now = datetime.now()
+_now = datetime.utcnow() + timedelta(hours=8)  # 台灣時間 UTC+8
 _is_market = (_now.weekday() < 5) and (9, 0) <= (_now.hour, _now.minute) <= (13, 30)
 _refresh_ms = 5 * 60 * 1000 if _is_market else 30 * 60 * 1000
 st_autorefresh(interval=_refresh_ms, key="autorefresh")
@@ -92,7 +92,8 @@ col_title, col_api, col_time = st.columns([3, 1, 1])
 with col_title:
     st.markdown("# 📡 TW-Radar 台股雷達站")
 with col_time:
-    st.markdown(f"<div style='text-align:right; color:#888; padding-top:10px;'>{datetime.now().strftime('%Y/%m/%d %H:%M')}</div>", unsafe_allow_html=True)
+    _tw_now = datetime.utcnow() + timedelta(hours=8)  # UTC+8 台灣時間
+    st.markdown(f"<div style='text-align:right; color:#888; padding-top:10px;'>{_tw_now.strftime('%Y/%m/%d %H:%M')} (台灣)</div>", unsafe_allow_html=True)
 
 # ── API 狀態偵測（每頁面載入檢查一次，快取10分鐘）──────
 with col_api:
@@ -159,6 +160,35 @@ STOCK_NAME_MAP = {
     "2912":"統一超","1216":"統一","2105":"正新","2609":"陽明",
     "2615":"萬海","2603":"長榮","6505":"台塑化",
 }
+
+@st.cache_data(ttl=86400)  # 每天更新一次股票名稱總表
+def _load_all_stock_names() -> dict:
+    """從 FinMind 載入全台股名稱對照表（快取24小時，免 token）"""
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://api.finmindtrade.com/api/v4/data",
+            params={"dataset": "TaiwanStockInfo"},
+            timeout=15, verify=False
+        )
+        data = resp.json()
+        if data.get("status") == 200:
+            df = pd.DataFrame(data["data"])
+            if "stock_id" in df.columns and "stock_name" in df.columns:
+                return dict(zip(df["stock_id"], df["stock_name"]))
+    except Exception:
+        pass
+    return {}
+
+
+def get_dynamic_stock_name(stock_id: str) -> str:
+    """優先靜態 map，miss 時查 FinMind 全表"""
+    name = get_dynamic_stock_name(stock_id)
+    if name:
+        return name
+    all_names = _load_all_stock_names()
+    return all_names.get(stock_id, "")
+
 
 def get_stock_current_price(stock_id: str) -> float:
     """取得股票最新收盤價"""
@@ -326,7 +356,7 @@ with col_market:
 
                 result = analyze_stock(
                     query_stock,
-                    STOCK_NAME_MAP.get(query_stock, query_stock),
+                    get_dynamic_stock_name(query_stock) or query_stock,
                     scores, extra_ctx,
                     recent_news=st.session_state.get("news_data", []),
                     attack_data=atk_data
@@ -601,7 +631,7 @@ with col_portfolio:
 
     if lookup_id.strip():
         sid_clean = lookup_id.strip()
-        auto_name = STOCK_NAME_MAP.get(sid_clean, "")
+        auto_name = get_dynamic_stock_name(sid_clean)
         ck = f"lookup_price_{sid_clean}"
         if ck not in st.session_state:
             with st.spinner(f"查詢 {sid_clean} 現價..."):
