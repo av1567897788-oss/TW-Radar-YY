@@ -18,7 +18,7 @@ except Exception:
 
 from datetime import datetime
 from utils.virtual_investors import (
-    INVESTORS, SCAN_LIST, init_sim_db,
+    INVESTORS, get_scan_list, init_sim_db,
     get_sim_capital, get_sim_holdings, sim_buy, sim_sell,
     save_daily_report, record_prediction, verify_predictions, get_accuracy_stats
 )
@@ -75,10 +75,11 @@ def run_daily_simulation():
     log("取得主力攻擊資料...")
     attack_data = detect_attacks()
 
-    # 掃描所有標的評分
-    log(f"掃描 {len(SCAN_LIST)} 支股票...")
+    # 動態取得全市場篩選後的掃描清單
+    scan_list = get_scan_list(attack_data)
+    log(f"掃描 {len(scan_list)} 支股票（全市場動態篩選）...")
     scores_cache = {}
-    for sid, sname in SCAN_LIST:
+    for sid, sname in scan_list:
         s = compute_full_score(sid, attack_data)
         scores_cache[sid] = {**s, "name": sname}
         if s["total"] >= 40:

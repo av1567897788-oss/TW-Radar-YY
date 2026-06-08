@@ -254,3 +254,98 @@ def get_chip_score(institutional_df: pd.DataFrame) -> dict:
             details[f"投信3日淨買{it_net:+,.0f}股"] = "✅ +5"
 
     return {"score": min(score, 20), "details": details}
+
+
+# ── 全市場掃描工具（TWSE 官方 API，免費不限次）──────────────
+
+def get_twse_all_stocks_today() -> pd.DataFrame:
+    """
+    TWSE 官方 API 一次取得全部上市股票今日行情。
+    欄位：stock_id, stock_name, close, change, volume, pe_ratio
+    非盤中（盤後）才有完整資料；盤中回傳空 DataFrame。
+    """
+    try:
+        from datetime import datetime
+        today = datetime.now().strftime("%Y%m%d")
+        r = requests.get(
+            "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL",
+            params={"response": "json", "date": today},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15, verify=False
+        )
+        data = r.json()
+        if data.get("stat") != "OK" or not data.get("data"):
+            return pd.DataFrame()
+        fields = data.get("fields", [])
+        df = pd.DataFrame(data["data"], columns=fields)
+        # 標準化欄位名稱
+        rename = {
+            "證券代號": "stock_id",
+            "證券名稱": "stock_name",
+            "收盤價":   "close",
+            "漲跌價差": "change",
+            "成交股數": "volume",
+            "本益比":   "pe_ratio",
+        }
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+        # 排除 ETF（代號開頭 00）與權證
+        df = df[df["stock_id"].str.match(r"^\d{4}$", na=False)]
+        # 數值轉換
+        for col in ["close", "change", "volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", "").str.strip(), errors="coerce"
+                )
+        return df.dropna(subset=["close"]).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_twse_institutional_all(date_str: str = None) -> pd.DataFrame:
+    """
+    TWSE 三大法人買賣超（全市場，一次取得）。
+    回傳 DataFrame：stock_id, foreign_net, invest_net, dealer_net, total_net
+    """
+    try:
+        from datetime import datetime
+        if not date_str:
+            date_str = datetime.now().strftime("%Y%m%d")
+        r = requests.get(
+            "https://www.twse.com.tw/fund/TWT43U",
+            params={"response": "json", "date": date_str, "selectType": "ALLBUT0999"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15, verify=False
+        )
+        data = r.json()
+        if data.get("stat") != "OK" or not data.get("data"):
+            return pd.DataFrame()
+        fields = data.get("fields", [])
+        df = pd.DataFrame(data["data"], columns=fields)
+        # 標準化
+        rename_map = {}
+        for c in fields:
+            if "代號" in c or "代碼" in c:
+                rename_map[c] = "stock_id"
+            elif "外資" in c and "合計" in c:
+                rename_map[c] = "foreign_net"
+            elif "投信" in c:
+                rename_map[c] = "invest_net"
+            elif "自營商" in c and "合計" not in c and "自行" not in c:
+                rename_map[c] = "dealer_net"
+        df = df.rename(columns=rename_map)
+        if "stock_id" not in df.columns:
+            # 嘗試第一欄為 stock_id
+            df = df.rename(columns={fields[0]: "stock_id"})
+
+        df = df[df["stock_id"].str.match(r"^\d{4}$", na=False)]
+        for col in ["foreign_net", "invest_net", "dealer_net"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", "").str.strip(), errors="coerce"
+                ).fillna(0)
+        # 總淨買
+        net_cols = [c for c in ["foreign_net", "invest_net", "dealer_net"] if c in df.columns]
+        df["total_net"] = df[net_cols].sum(axis=1)
+        return df.reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()

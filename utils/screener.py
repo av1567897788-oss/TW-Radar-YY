@@ -9,7 +9,10 @@ TW-Radar 選股引擎 v2
 
 import pandas as pd
 from datetime import datetime
-from utils.stock_data import get_stock_price, get_institutional, compute_technical_score, get_chip_score
+from utils.stock_data import (
+    get_stock_price, get_institutional, compute_technical_score, get_chip_score,
+    get_twse_all_stocks_today, get_twse_institutional_all
+)
 from utils.fundamental_score import get_fundamental_score
 from utils.sector_score import get_sector_score
 from utils.prophet_score import get_prophet_stock_score
@@ -54,31 +57,93 @@ _dynamic_cache_time = None
 
 def get_dynamic_watch_list(attack_data: dict = None) -> list:
     """
-    動態擴充監控清單：
-    1. 核心清單（固定）
-    2. 主力攻擊偵測到的大買超股票（動態加入）
-    3. 避免清單過長（最多50支）
+    全市場兩階段篩選：
+    Stage 1 - TWSE 官方 API 一次取得所有股票行情 + 三大法人買賣超
+             → 快速預篩前 80 支候選（漲幅、量能、外資買超、各產業代表）
+    Stage 2 - 五層深度評分（在 get_recommended_stocks 執行）
+
+    快取 10 分鐘，避免重複呼叫 TWSE
     """
     global _dynamic_cache, _dynamic_cache_time
 
-    # 5分鐘快取
     if _dynamic_cache and _dynamic_cache_time and \
-       (datetime.now() - _dynamic_cache_time).seconds < 300:
+       (datetime.now() - _dynamic_cache_time).seconds < 600:
         return _dynamic_cache
 
-    result = list(CORE_LIST)  # 從核心清單開始
-    core_ids = {s[0] for s in CORE_LIST}
+    seen_ids = set()
+    result = []
 
-    # 從主力攻擊資料補充（外資大買超的股票）
+    def add(sid, sname):
+        if sid not in seen_ids and sid.isdigit() and len(sid) == 4:
+            seen_ids.add(sid)
+            result.append((sid, sname or sid))
+
+    # ── 核心清單（保底，確保主要股一定掃到）──────────────
+    for sid, sname in CORE_LIST:
+        add(sid, sname)
+
+    # ── Stage 1A：TWSE 今日全市場行情預篩 ─────────────────
+    try:
+        all_df = get_twse_all_stocks_today()
+        if not all_df.empty and "close" in all_df.columns:
+            # 1. 漲幅前 20（今日強勢股）
+            if "change" in all_df.columns:
+                top_gain = all_df.nlargest(20, "change")
+                for _, row in top_gain.iterrows():
+                    add(str(row["stock_id"]), str(row.get("stock_name", "")))
+
+            # 2. 成交量前 20（市場熱度最高）
+            if "volume" in all_df.columns:
+                top_vol = all_df.nlargest(20, "volume")
+                for _, row in top_vol.iterrows():
+                    add(str(row["stock_id"]), str(row.get("stock_name", "")))
+    except Exception:
+        pass
+
+    # ── Stage 1B：三大法人買超前 20 ───────────────────────
+    try:
+        inst_df = get_twse_institutional_all()
+        if not inst_df.empty and "total_net" in inst_df.columns:
+            top_inst = inst_df.nlargest(20, "total_net")
+            # 先從 all_df 補名稱，若已有就用
+            for _, row in top_inst.iterrows():
+                sid = str(row["stock_id"])
+                sname = ""
+                if "all_df" in dir() and not all_df.empty:
+                    nm = all_df[all_df["stock_id"] == sid]
+                    if not nm.empty and "stock_name" in nm.columns:
+                        sname = str(nm.iloc[0]["stock_name"])
+                add(sid, sname)
+    except Exception:
+        pass
+
+    # ── Stage 1C：主力攻擊偵測補充（attack_detector）────────
     if attack_data and attack_data.get("large_buy"):
-        for item in attack_data["large_buy"][:10]:
-            sid = item["stock_id"]
-            if sid not in core_ids and not sid.startswith("00"):  # 排除ETF
-                result.append((sid, item["name"]))
-                core_ids.add(sid)
+        for item in attack_data["large_buy"][:15]:
+            add(str(item["stock_id"]), item.get("name", ""))
 
-    # 最多50支
-    result = result[:50]
+    # ── 各產業補充（確保全產業覆蓋）──────────────────────
+    SECTOR_SEEDS = [
+        # 生技醫療
+        ("4726","東洋"),("1790","庚申"),("4737","華廣"),("6547","北極星藥業"),
+        # 能源/綠能
+        ("3576","聯合再生"),("6213","聯茂"),("6176","瑞儀"),
+        # 房地產
+        ("2597","潤弘"),("5522","遠雄"),
+        # 觀光餐飲
+        ("2727","王品"),("2706","第一店"),
+        # 傳產化工
+        ("1326","台化"),("1402","遠東新"),
+        # 電子零組件
+        ("2379","瑞昱"),("2385","群光"),("3231","緯創"),
+        # 光電/面板
+        ("2412","中華電"),("3481","群創"),("2409","友達"),
+    ]
+    for sid, sname in SECTOR_SEEDS:
+        add(sid, sname)
+
+    # 最多 100 支（避免單次掃描太久）
+    result = result[:100]
 
     _dynamic_cache = result
     _dynamic_cache_time = datetime.now()
