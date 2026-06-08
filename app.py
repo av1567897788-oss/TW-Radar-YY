@@ -161,11 +161,39 @@ STOCK_NAME_MAP = {
     "2615":"萬海","2603":"長榮","6505":"台塑化",
 }
 
-@st.cache_data(ttl=86400)  # 每天更新一次股票名稱總表
+@st.cache_data(ttl=86400)
 def _load_all_stock_names() -> dict:
-    """從 FinMind 載入全台股名稱對照表（快取24小時，免 token）"""
+    """
+    全台股名稱對照表（雙來源）：
+    優先 TWSE 官方（學校網路可用），備用 FinMind
+    """
+    import requests as _req
+
+    # ── 來源1：TWSE STOCK_DAY_ALL（一次取所有上市股名稱）──
     try:
-        import requests as _req
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%Y%m%d")
+        r = _req.get(
+            "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL",
+            params={"response": "json", "date": today},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10, verify=False
+        )
+        data = r.json()
+        if data.get("stat") == "OK" and data.get("data"):
+            fields = data.get("fields", [])
+            df = pd.DataFrame(data["data"], columns=fields)
+            id_col = next((c for c in fields if "代號" in c or "代碼" in c), None)
+            nm_col = next((c for c in fields if "名稱" in c), None)
+            if id_col and nm_col:
+                result = dict(zip(df[id_col].str.strip(), df[nm_col].str.strip()))
+                if len(result) > 100:
+                    return result
+    except Exception:
+        pass
+
+    # ── 來源2：FinMind（備用）───────────────────────────────
+    try:
         resp = _req.get(
             "https://api.finmindtrade.com/api/v4/data",
             params={"dataset": "TaiwanStockInfo"},
@@ -181,23 +209,72 @@ def _load_all_stock_names() -> dict:
     return {}
 
 
+def get_twse_realtime_info(stock_id: str) -> dict:
+    """
+    TWSE 即時個股查詢（學校網路可用）。
+    回傳 {"name": str, "price": float}
+    """
+    import requests as _req
+    try:
+        r = _req.get(
+            f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+            f"?ex_ch=tse_{stock_id}.tw&json=1&delay=0",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8, verify=False
+        )
+        item = r.json().get("msgArray", [{}])[0]
+        name  = item.get("n", "").strip()
+        price = float(item.get("z", 0) or item.get("y", 0) or 0)
+        return {"name": name, "price": price}
+    except Exception:
+        pass
+    # 嘗試 OTC（上櫃）
+    try:
+        r = _req.get(
+            f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+            f"?ex_ch=otc_{stock_id}.tw&json=1&delay=0",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8, verify=False
+        )
+        item = r.json().get("msgArray", [{}])[0]
+        name  = item.get("n", "").strip()
+        price = float(item.get("z", 0) or item.get("y", 0) or 0)
+        return {"name": name, "price": price}
+    except Exception:
+        pass
+    return {"name": "", "price": 0.0}
+
+
 def get_dynamic_stock_name(stock_id: str) -> str:
-    """優先靜態 map，miss 時查 FinMind 全表"""
+    """優先靜態 map → TWSE 即時 → FinMind 全表"""
     name = STOCK_NAME_MAP.get(stock_id, "")
     if name:
         return name
+    # TWSE 即時查詢（快速且學校網路可用）
+    info = get_twse_realtime_info(stock_id)
+    if info.get("name"):
+        return info["name"]
+    # 最後備用：FinMind 全表
     all_names = _load_all_stock_names()
     return all_names.get(stock_id, "")
 
 
 def get_stock_current_price(stock_id: str) -> float:
-    """取得股票最新收盤價"""
+    """取得股票最新價（FinMind → TWSE 即時雙來源）"""
     ck = f"price_{stock_id}"
     if ck in st.session_state:
         return st.session_state[ck]
+    # 先試 FinMind
     df = get_stock_price(stock_id, days=5)
     if not df.empty and "close" in df.columns:
         price = float(df["close"].iloc[-1])
+        st.session_state[ck] = price
+        st.session_state[f"{ck}_time"] = datetime.now()
+        return price
+    # FinMind 失敗 → fallback TWSE 即時（學校網路友善）
+    info = get_twse_realtime_info(stock_id)
+    if info.get("price", 0) > 0:
+        price = info["price"]
         st.session_state[ck] = price
         st.session_state[f"{ck}_time"] = datetime.now()
         return price
