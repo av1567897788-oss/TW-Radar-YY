@@ -183,7 +183,7 @@ def _load_all_stock_names() -> dict:
 
 def get_dynamic_stock_name(stock_id: str) -> str:
     """優先靜態 map，miss 時查 FinMind 全表"""
-    name = get_dynamic_stock_name(stock_id)
+    name = STOCK_NAME_MAP.get(stock_id, "")
     if name:
         return name
     all_names = _load_all_stock_names()
