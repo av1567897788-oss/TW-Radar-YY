@@ -210,13 +210,20 @@ def get_recommended_stocks(top_n: int = 10, attack_data: dict = None,
     推薦股：五層100分評分，由高到低排列
     動態監控清單 = 核心清單 + 當日主力大買清單
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     watch_list = get_dynamic_watch_list(attack_data)
     results = []
 
-    for sid, sname in watch_list:
-        data = score_stock_full(sid, sname, attack_data, news_list)
-        if data:
-            results.append(data)
+    def _score(item):
+        sid, sname = item
+        return score_stock_full(sid, sname, attack_data, news_list)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_score, item): item for item in watch_list}
+        for future in as_completed(futures):
+            data = future.result()
+            if data:
+                results.append(data)
 
     results.sort(key=lambda x: x["total_score"], reverse=True)
 

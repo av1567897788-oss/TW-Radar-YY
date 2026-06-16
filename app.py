@@ -183,8 +183,10 @@ for _, _row in holdings.iterrows():
     _tk = f"{_ck}_time"
     if _ck not in st.session_state or \
        (datetime.now() - st.session_state.get(_tk, datetime.min)).seconds > 300:
-        _df = get_stock_price(_sid, days=5)
-        _price = float(_df["close"].iloc[-1]) if not _df.empty and "close" in _df.columns else float(_row["buy_price"])
+        _price = get_stock_current_price(_sid)
+        if _price <= 0:
+            _df = get_stock_price(_sid, days=5)
+            _price = float(_df["close"].iloc[-1]) if not _df.empty and "close" in _df.columns else float(_row["buy_price"])
         st.session_state[_ck] = _price
         st.session_state[_tk] = datetime.now()
 
@@ -371,33 +373,51 @@ with col_market:
 
     # 走勢圖（以台積電近期走勢呈現大盤趨勢）
     if not twii_df.empty and "close" in twii_df.columns:
-        fig = go.Figure()
-        if all(c in twii_df.columns for c in ["open", "max", "min", "close"]):
-            fig.add_trace(go.Candlestick(
-                x=twii_df["date"],
-                open=twii_df["open"].astype(float),
-                high=twii_df["max"].astype(float),
-                low=twii_df["min"].astype(float),
-                close=twii_df["close"].astype(float),
-                name="2330",
-                increasing_line_color="#FF4B4B",   # 台股慣例：漲=紅
-                decreasing_line_color="#22C55E"    # 台股慣例：跌=綠
-            ))
-        else:
-            fig.add_trace(go.Scatter(
-                x=twii_df["date"], y=twii_df["close"].astype(float),
-                line=dict(color="#00D4AA", width=2), name="台積電走勢"
-            ))
-        fig.update_layout(
-            height=240, margin=dict(l=0, r=0, t=5, b=0),
-            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
-            font=dict(color="#FAFAFA", size=10),
-            xaxis=dict(showgrid=False, rangeslider_visible=False),
-            yaxis=dict(showgrid=True, gridcolor="#2A2D3A"),
-            showlegend=False
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.markdown("<div style='color:#444; font-size:0.7rem;'>* K線顯示台積電(2330)走勢，與大盤高度相關</div>", unsafe_allow_html=True)
+        try:
+            # 強制數值轉換（防止字串/NaN 導致圖跑不出來）
+            _kdf = twii_df.copy()
+            for _col in ["open", "max", "min", "close"]:
+                if _col in _kdf.columns:
+                    _kdf[_col] = pd.to_numeric(
+                        _kdf[_col].astype(str).str.replace(",", ""), errors="coerce"
+                    )
+            _kdf = _kdf.dropna(subset=["close"])
+            fig = go.Figure()
+            if not _kdf.empty and all(c in _kdf.columns for c in ["open", "max", "min", "close"]):
+                _valid = _kdf.dropna(subset=["open","max","min","close"])
+                if not _valid.empty:
+                    fig.add_trace(go.Candlestick(
+                        x=_valid["date"],
+                        open=_valid["open"],
+                        high=_valid["max"],
+                        low=_valid["min"],
+                        close=_valid["close"],
+                        name="2330",
+                        increasing_line_color="#FF4B4B",
+                        decreasing_line_color="#22C55E"
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=_kdf["date"], y=_kdf["close"],
+                        line=dict(color="#00D4AA", width=2), name="台積電走勢"
+                    ))
+            else:
+                fig.add_trace(go.Scatter(
+                    x=_kdf["date"], y=_kdf["close"],
+                    line=dict(color="#00D4AA", width=2), name="台積電走勢"
+                ))
+            fig.update_layout(
+                height=240, margin=dict(l=0, r=0, t=5, b=0),
+                plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
+                font=dict(color="#FAFAFA", size=10),
+                xaxis=dict(showgrid=False, rangeslider_visible=False),
+                yaxis=dict(showgrid=True, gridcolor="#2A2D3A"),
+                showlegend=False
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("<div style='color:#444; font-size:0.7rem;'>* K線顯示台積電(2330)走勢，與大盤高度相關</div>", unsafe_allow_html=True)
+        except Exception as _e:
+            st.markdown(f"<div style='color:#555; font-size:0.8rem;'>⚠️ K線圖暫時無法載入，請重新整理（{type(_e).__name__}）</div>", unsafe_allow_html=True)
 
     # ── 我的持股即時行情（有持股才顯示）────────────────────
     if not holdings.empty:
@@ -409,12 +429,14 @@ with col_market:
             buy_price = float(row["buy_price"])
             shares = float(row["shares"])
 
-            # 取最新價
+            # 取最新價（即時優先）
             cache_key = f"price_{sid}"
             if cache_key not in st.session_state or \
                (datetime.now() - st.session_state.get(f"{cache_key}_time", datetime.min)).seconds > 300:
-                df_p = get_stock_price(sid, days=5)
-                cur = float(df_p["close"].iloc[-1]) if not df_p.empty and "close" in df_p.columns else buy_price
+                cur = get_stock_current_price(sid)
+                if cur <= 0:
+                    df_p = get_stock_price(sid, days=5)
+                    cur = float(df_p["close"].iloc[-1]) if not df_p.empty and "close" in df_p.columns else buy_price
                 st.session_state[cache_key] = cur
                 st.session_state[f"{cache_key}_time"] = datetime.now()
             else:
@@ -639,12 +661,14 @@ with col_portfolio:
             else:
                 qty_display = f"{int(shares)}股"
 
-            # 取最新價（快取5分鐘）
+            # 取最新價（即時優先，快取5分鐘）
             cache_key = f"price_{stock_id}"
             if cache_key not in st.session_state or \
                (datetime.now() - st.session_state.get(f"{cache_key}_time", datetime.min)).seconds > 300:
-                df = get_stock_price(stock_id, days=5)
-                current_price = float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns else buy_price
+                current_price = get_stock_current_price(stock_id)
+                if current_price <= 0:
+                    df = get_stock_price(stock_id, days=5)
+                    current_price = float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns else buy_price
                 st.session_state[cache_key] = current_price
                 st.session_state[f"{cache_key}_time"] = datetime.now()
             else:
